@@ -563,8 +563,10 @@ int smb2_allocate_rsp_buf(struct ksmbd_work *work)
 	size_t sz = small_sz;
 	int cmd = le16_to_cpu(hdr->Command);
 
-	if (cmd == SMB2_IOCTL_HE || cmd == SMB2_QUERY_DIRECTORY_HE)
+	if (cmd == SMB2_IOCTL_HE || cmd == SMB2_QUERY_DIRECTORY_HE) {
 		sz = large_sz;
+		work->set_trans_buf = true;
+	}
 
 	if (cmd == SMB2_QUERY_INFO_HE) {
 		struct smb2_query_info_req *req;
@@ -572,15 +574,18 @@ int smb2_allocate_rsp_buf(struct ksmbd_work *work)
 		req = REQUEST_BUF(work);
 		if (req->InfoType == SMB2_O_INFO_FILE &&
 			(req->FileInfoClass == FILE_FULL_EA_INFORMATION ||
-				req->FileInfoClass == FILE_ALL_INFORMATION))
+				req->FileInfoClass == FILE_ALL_INFORMATION)) {
 			sz = large_sz;
+			work->set_trans_buf = true;
+		}
 	}
 
 	/* allocate large response buf for chained commands */
 	if (le32_to_cpu(hdr->NextCommand) > 0)
 		sz = large_sz;
 
-	if (server_conf.flags & KSMBD_GLOBAL_FLAG_CACHE_TBUF)
+	if (server_conf.flags & KSMBD_GLOBAL_FLAG_CACHE_TBUF &&
+			work->set_trans_buf)
 		work->response_buf = ksmbd_find_buffer(sz);
 	else
 		work->response_buf = ksmbd_alloc_response(sz);
@@ -7024,7 +7029,7 @@ static int fsctl_query_allocated_ranges(struct ksmbd_work *work, uint64_t id,
 	int in_count, int *out_count)
 {
 	struct ksmbd_file *fp;
-	u64 start, length;
+	loff_t start, length;
 	int ret = 0;
 
 	*out_count = 0;
@@ -7038,7 +7043,7 @@ static int fsctl_query_allocated_ranges(struct ksmbd_work *work, uint64_t id,
 	start = le64_to_cpu(qar_req->file_offset);
 	length = le64_to_cpu(qar_req->length);
 
-	ret = ksmbd_vfs_fiemap(fp, start, length,
+	ret = ksmbd_vfs_fqar_lseek(fp, start, length,
 			qar_rsp, in_count, out_count);
 	if (ret && ret != -E2BIG)
 		*out_count = 0;
