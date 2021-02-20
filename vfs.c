@@ -235,7 +235,6 @@ int ksmbd_vfs_mkdir(struct ksmbd_work *work,
 
 	dentry = kern_path_create(AT_FDCWD, name, &path, LOOKUP_DIRECTORY);
 	if (IS_ERR(dentry)) {
-		ksmbd_revert_fsids(work);
 		err = PTR_ERR(dentry);
 		if (err != -EEXIST)
 			ksmbd_debug(VFS, "path create failed for %s, err %d\n",
@@ -1039,7 +1038,7 @@ static int __ksmbd_vfs_rename(struct ksmbd_work *work,
 	err = PTR_ERR(dst_dent);
 	if (IS_ERR(dst_dent)) {
 		ksmbd_err("lookup failed %s [%d]\n", dst_name, err);
-		return err;
+		goto out;
 	}
 
 	err = -ENOTEMPTY;
@@ -1055,6 +1054,7 @@ static int __ksmbd_vfs_rename(struct ksmbd_work *work,
 		ksmbd_err("vfs_rename failed err %d\n", err);
 	if (dst_dent)
 		dput(dst_dent);
+out:
 	ksmbd_revert_fsids(work);
 	return err;
 }

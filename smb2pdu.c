@@ -2353,9 +2353,11 @@ static void smb2_new_xattrs(struct ksmbd_tree_connect *tcon,
 				    KSMBD_SHARE_FLAG_STORE_DOS_ATTRS))
 		return;
 
-	da.version = 3;
+	da.version = 4;
 	da.attr = le32_to_cpu(fp->f_ci->m_fattr);
-	da.create_time = fp->create_time;
+	da.itime = da.create_time = fp->create_time;
+	da.flags = XATTR_DOSINFO_ATTRIB | XATTR_DOSINFO_CREATE_TIME |
+		XATTR_DOSINFO_ITIME;
 
 	rc = ksmbd_vfs_set_dos_attrib_xattr(path->dentry, &da);
 	if (rc)
@@ -2380,6 +2382,7 @@ static void smb2_update_xattrs(struct ksmbd_tree_connect *tcon,
 	if (rc > 0) {
 		fp->f_ci->m_fattr = cpu_to_le32(da.attr);
 		fp->create_time = da.create_time;
+		fp->itime = da.itime;
 	}
 }
 
@@ -2405,21 +2408,21 @@ static int smb2_creat(struct ksmbd_work *work,
 		mode = share_config_directory_mode(share, posix_mode);
 		rc = ksmbd_vfs_mkdir(work, name, mode);
 		if (rc)
-			return -EIO;
+			return rc;
 	} else {
 		ksmbd_debug(SMB, "creating regular file\n");
 
 		mode = share_config_create_mode(share, posix_mode);
 		rc = ksmbd_vfs_create(work, name, mode);
 		if (rc)
-			return -EIO;
+			return rc;
 	}
 
 	rc = ksmbd_vfs_kern_path(name, 0, path, 0);
 	if (rc) {
 		ksmbd_err("cannot get linux path (%s), err = %d\n",
 				name, rc);
-		return -EIO;
+		return rc;
 	}
 	return 0;
 }
@@ -2577,7 +2580,11 @@ int smb2_open(struct ksmbd_work *work)
 				goto err_out1;
 			rc = ksmbd_reopen_durable_fd(work, d_info.fp);
 			if (rc)
-				goto err_out;
+				goto err_out1;
+			if (ksmbd_override_fsids(work)) {
+				rc = -ENOMEM;
+				goto err_out1;
+			}
 			file_info = FILE_OPENED;
 			fp = d_info.fp;
 			goto reconnected;
@@ -2669,12 +2676,8 @@ int smb2_open(struct ksmbd_work *work)
 			if (rc < 0)
 				goto err_out1;
 		} else {
-			struct create_mxac_req *mxac_req =
-				(struct create_mxac_req *)context;
-
 			ksmbd_debug(SMB,
-				"get query maximal access context (timestamp : %llu)\n",
-				le64_to_cpu(mxac_req->Timestamp));
+				"get query maximal access context\n");
 			maximal_access_ctxt = 1;
 		}
 
@@ -2729,6 +2732,7 @@ int smb2_open(struct ksmbd_work *work)
 			if (req->CreateDisposition == FILE_OVERWRITE_IF_LE ||
 				req->CreateDisposition == FILE_OPEN_IF_LE) {
 				rc = -EACCES;
+				path_put(&path);
 				goto err_out;
 			}
 
@@ -2737,6 +2741,7 @@ int smb2_open(struct ksmbd_work *work)
 				ksmbd_debug(SMB,
 					"User does not have write permission\n");
 				rc = -EACCES;
+				path_put(&path);
 				goto err_out;
 			}
 		}
@@ -2755,6 +2760,7 @@ int smb2_open(struct ksmbd_work *work)
 			rc = ksmbd_vfs_kern_path(name, 0, &path, 1);
 			if (!rc && d_is_symlink(path.dentry)) {
 				rc = -EACCES;
+				path_put(&path);
 				goto err_out;
 			}
 		}
@@ -3686,7 +3692,8 @@ static int process_query_dir_entries(struct smb2_query_dir_private *priv)
 				     PTR_ERR(dent));
 			continue;
 		}
-		if (d_is_negative(dent)) {
+		if (unlikely(d_is_negative(dent))) {
+			dput(dent);
 			ksmbd_debug(SMB, "Negative dentry `%s'\n",
 				    priv->d_info->name);
 			continue;
@@ -5677,9 +5684,12 @@ static int set_file_basic_info(struct ksmbd_file *fp,
 	    (file_info->CreationTime || file_info->Attributes)) {
 		struct xattr_dos_attrib da = {0};
 
-		da.version = 3;
+		da.version = 4;
+		da.itime = fp->itime;
 		da.create_time = fp->create_time;
 		da.attr = le32_to_cpu(fp->f_ci->m_fattr);
+		da.flags = XATTR_DOSINFO_ATTRIB | XATTR_DOSINFO_CREATE_TIME |
+			XATTR_DOSINFO_ITIME;
 
 		rc = ksmbd_vfs_set_dos_attrib_xattr(filp->f_path.dentry, &da);
 		if (rc)
