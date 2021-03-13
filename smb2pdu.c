@@ -3854,9 +3854,6 @@ static int __query_dir(struct dir_context *ctx,
 	/* dot and dotdot entries are already reserved */
 	if (!strcmp(".", name) || !strcmp("..", name))
 		return 0;
-	/* Hide backup files, e.g. ~$file.doc */
-	if (!strncmp("~$", name, 2))
-		return 0;
 	if (ksmbd_share_veto_filename(priv->work->tcon->share_conf, name))
 		return 0;
 	if (!match_pattern(name, priv->search_pattern))
@@ -5718,13 +5715,14 @@ static int set_file_basic_info(struct ksmbd_file *fp,
 
 	if (file_info->Attributes) {
 		if (!S_ISDIR(inode->i_mode) &&
-				file_info->Attributes == ATTR_DIRECTORY_LE) {
+				file_info->Attributes & ATTR_DIRECTORY_LE) {
 			ksmbd_err("can't change a file to a directory\n");
 			return -EINVAL;
 		}
 
 		if (!(S_ISDIR(inode->i_mode) && file_info->Attributes == ATTR_NORMAL_LE))
-			fp->f_ci->m_fattr = file_info->Attributes;
+			fp->f_ci->m_fattr = file_info->Attributes |
+				(fp->f_ci->m_fattr & ATTR_DIRECTORY_LE);
 	}
 
 	if (test_share_config_flag(share, KSMBD_SHARE_FLAG_STORE_DOS_ATTRS) &&
