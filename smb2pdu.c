@@ -564,10 +564,8 @@ int smb2_allocate_rsp_buf(struct ksmbd_work *work)
 		work->response_buf = ksmbd_find_buffer(sz);
 	else
 		work->response_buf = kvmalloc(sz, GFP_KERNEL | __GFP_ZERO);
-	if (!work->response_buf) {
-		ksmbd_err("Failed to allocate %zu bytes buffer\n", sz);
+	if (!work->response_buf)
 		return -ENOMEM;
-	}
 
 	work->response_sz = sz;
 	return 0;
@@ -618,7 +616,8 @@ static void destroy_previous_session(struct ksmbd_user *user, u64 id)
 
 	prev_user = prev_sess->user;
 
-	if (strcmp(user->name, prev_user->name) ||
+	if (!prev_user ||
+	    strcmp(user->name, prev_user->name) ||
 	    user->passkey_sz != prev_user->passkey_sz ||
 	    memcmp(user->passkey, prev_user->passkey, user->passkey_sz)) {
 		put_session(prev_sess);
@@ -902,7 +901,9 @@ static int decode_encrypt_ctxt(struct ksmbd_conn *conn,
 
 	for (i = 0; i < cph_cnt; i++) {
 		if (pneg_ctxt->Ciphers[i] == SMB2_ENCRYPTION_AES128_GCM ||
-		    pneg_ctxt->Ciphers[i] == SMB2_ENCRYPTION_AES128_CCM) {
+		    pneg_ctxt->Ciphers[i] == SMB2_ENCRYPTION_AES128_CCM ||
+		    pneg_ctxt->Ciphers[i] == SMB2_ENCRYPTION_AES256_CCM ||
+		    pneg_ctxt->Ciphers[i] == SMB2_ENCRYPTION_AES256_GCM) {
 			ksmbd_debug(SMB, "Cipher ID = 0x%x\n",
 				pneg_ctxt->Ciphers[i]);
 			conn->cipher_type = pneg_ctxt->Ciphers[i];
@@ -1190,8 +1191,8 @@ static int decode_negotiation_token(struct ksmbd_work *work,
 	req = work->request_buf;
 	sz = le16_to_cpu(req->SecurityBufferLength);
 
-	if (!ksmbd_decode_negTokenInit((char *)negblob, sz, conn)) {
-		if (!ksmbd_decode_negTokenTarg((char *)negblob, sz, conn)) {
+	if (ksmbd_decode_negTokenInit((char *)negblob, sz, conn)) {
+		if (ksmbd_decode_negTokenTarg((char *)negblob, sz, conn)) {
 			conn->auth_mechs |= KSMBD_AUTH_NTLMSSP;
 			conn->preferred_auth_mech = KSMBD_AUTH_NTLMSSP;
 			conn->use_spnego = false;
@@ -1916,9 +1917,13 @@ static noinline int create_smb2_pipe(struct ksmbd_work *work)
 	}
 
 	id = ksmbd_session_rpc_open(work->sess, name);
-	if (id < 0)
+	if (id < 0) {
 		ksmbd_err("Unable to open RPC pipe: %d\n", id);
+		err = id;
+		goto out;
+	}
 
+	rsp->hdr.Status = STATUS_SUCCESS;
 	rsp->StructureSize = cpu_to_le16(89);
 	rsp->OplockLevel = SMB2_OPLOCK_LEVEL_NONE;
 	rsp->Reserved = 0;
@@ -1941,6 +1946,19 @@ static noinline int create_smb2_pipe(struct ksmbd_work *work)
 	return 0;
 
 out:
+	switch (err) {
+	case -EINVAL:
+		rsp->hdr.Status = STATUS_INVALID_PARAMETER;
+		break;
+	case -ENOSPC:
+	case -ENOMEM:
+		rsp->hdr.Status = STATUS_NO_MEMORY;
+		break;
+	}
+
+	if (!IS_ERR(name))
+		kfree(name);
+
 	smb2_set_err_rsp(work);
 	return err;
 }
@@ -2229,6 +2247,19 @@ static int smb2_create_sd_buffer(struct ksmbd_work *work,
 	}
 
 	return rc;
+}
+
+
+static void ksmbd_acls_fattr(struct smb_fattr *fattr, struct inode *inode)
+{
+	fattr->cf_uid = inode->i_uid;
+	fattr->cf_gid = inode->i_gid;
+	fattr->cf_mode = inode->i_mode;
+	fattr->cf_dacls = NULL;
+
+	fattr->cf_acls = ksmbd_vfs_get_acl(inode, ACL_TYPE_ACCESS);
+	if (S_ISDIR(inode->i_mode))
+		fattr->cf_dacls = ksmbd_vfs_get_acl(inode, ACL_TYPE_DEFAULT);
 }
 
 /**
@@ -2719,23 +2750,13 @@ int smb2_open(struct ksmbd_work *work)
 							   KSMBD_SHARE_FLAG_ACL_XATTR)) {
 					struct smb_fattr fattr;
 					struct smb_ntsd *pntsd;
-					int pntsd_size, ace_num;
+					int pntsd_size, ace_num = 0;
 
-					fattr.cf_uid = inode->i_uid;
-					fattr.cf_gid = inode->i_gid;
-					fattr.cf_mode = inode->i_mode;
-					fattr.cf_dacls = NULL;
-					ace_num = 0;
-
-					fattr.cf_acls = ksmbd_vfs_get_acl(inode, ACL_TYPE_ACCESS);
+					ksmbd_acls_fattr(&fattr, inode);
 					if (fattr.cf_acls)
 						ace_num = fattr.cf_acls->a_count;
-					if (S_ISDIR(inode->i_mode)) {
-						fattr.cf_dacls =
-							ksmbd_vfs_get_acl(inode, ACL_TYPE_DEFAULT);
-						if (fattr.cf_dacls)
-							ace_num += fattr.cf_dacls->a_count;
-					}
+					if (fattr.cf_dacls)
+						ace_num += fattr.cf_dacls->a_count;
 
 					pntsd = kmalloc(sizeof(struct smb_ntsd) +
 							sizeof(struct smb_sid) * 3 +
@@ -2753,6 +2774,7 @@ int smb2_open(struct ksmbd_work *work)
 
 					rc = ksmbd_vfs_set_sd_xattr(conn,
 						path.dentry, pntsd, pntsd_size);
+					kfree(pntsd);
 					if (rc)
 						ksmbd_err("failed to store ntacl in xattr : %d\n",
 								rc);
@@ -3327,6 +3349,7 @@ static int smb2_populate_readdir_entry(struct ksmbd_conn *conn, int info_level,
 
 	d_info->last_entry_offset = d_info->data_count;
 	d_info->data_count += next_entry_offset;
+	d_info->out_buf_len -= next_entry_offset;
 	d_info->wptr += next_entry_offset;
 	kfree(conv_name);
 
@@ -4836,6 +4859,24 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	int addition_info = le32_to_cpu(req->AdditionalInformation);
 	int rc;
 
+	if (addition_info & ~(OWNER_SECINFO | GROUP_SECINFO | DACL_SECINFO)) {
+		ksmbd_debug(SMB, "Unsupported addition info: 0x%x)\n",
+			addition_info);
+
+		pntsd->revision = cpu_to_le16(1);
+		pntsd->type = cpu_to_le16(SELF_RELATIVE | DACL_PROTECTED);
+		pntsd->osidoffset = 0;
+		pntsd->gsidoffset = 0;
+		pntsd->sacloffset = 0;
+		pntsd->dacloffset = 0;
+
+		secdesclen = sizeof(struct smb_ntsd);
+		rsp->OutputBufferLength = cpu_to_le32(secdesclen);
+		inc_rfc1001_len(rsp_org, secdesclen);
+
+		return 0;
+	}
+
 	if (work->next_smb2_rcv_hdr_off) {
 		if (!HAS_FILE_ID(le64_to_cpu(req->VolatileFileId))) {
 			ksmbd_debug(SMB, "Compound request set FID = %u\n",
@@ -4855,14 +4896,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 		return -ENOENT;
 
 	inode = FP_INODE(fp);
-	fattr.cf_uid = inode->i_uid;
-	fattr.cf_gid = inode->i_gid;
-	fattr.cf_mode = inode->i_mode;
-	fattr.cf_dacls = NULL;
-
-	fattr.cf_acls = ksmbd_vfs_get_acl(inode, ACL_TYPE_ACCESS);
-	if (S_ISDIR(inode->i_mode))
-		fattr.cf_dacls = ksmbd_vfs_get_acl(inode, ACL_TYPE_DEFAULT);
+	ksmbd_acls_fattr(&fattr, inode);
 
 	if (test_share_config_flag(work->tcon->share_conf,
 				   KSMBD_SHARE_FLAG_ACL_XATTR))
@@ -5282,11 +5316,6 @@ out:
 	return rc;
 }
 
-static bool is_attributes_write_allowed(struct ksmbd_file *fp)
-{
-	return fp->daccess & FILE_WRITE_ATTRIBUTES_LE;
-}
-
 static int set_file_basic_info(struct ksmbd_file *fp, char *buf,
 		struct ksmbd_share_config *share)
 {
@@ -5297,7 +5326,7 @@ static int set_file_basic_info(struct ksmbd_file *fp, char *buf,
 	struct inode *inode;
 	int rc;
 
-	if (!is_attributes_write_allowed(fp))
+	if (!(fp->daccess & FILE_WRITE_ATTRIBUTES_LE))
 		return -EACCES;
 
 	file_info = (struct smb2_file_all_info *)buf;
@@ -5411,7 +5440,7 @@ static int set_file_allocation_info(struct ksmbd_work *work,
 	struct inode *inode;
 	int rc;
 
-	if (!is_attributes_write_allowed(fp))
+	if (!(fp->daccess & FILE_WRITE_DATA_LE))
 		return -EACCES;
 
 	file_alloc_info = (struct smb2_file_alloc_info *)buf;
@@ -5455,7 +5484,7 @@ static int set_end_of_file_info(struct ksmbd_work *work, struct ksmbd_file *fp,
 	struct inode *inode;
 	int rc;
 
-	if (!is_attributes_write_allowed(fp))
+	if (!(fp->daccess & FILE_WRITE_DATA_LE))
 		return -EACCES;
 
 	file_eof_info = (struct smb2_file_eof_info *)buf;
@@ -5866,8 +5895,8 @@ int smb2_read(struct ksmbd_work *work)
 			le64_to_cpu(req->VolatileFileId),
 			le64_to_cpu(req->PersistentFileId));
 	if (!fp) {
-		rsp->hdr.Status = STATUS_FILE_CLOSED;
-		return -ENOENT;
+		err = -ENOENT;
+		goto out;
 	}
 
 	if (!(fp->daccess & (FILE_READ_DATA_LE | FILE_READ_ATTRIBUTES_LE))) {
@@ -6103,7 +6132,7 @@ int smb2_write(struct ksmbd_work *work)
 {
 	struct smb2_write_req *req;
 	struct smb2_write_rsp *rsp, *rsp_org;
-	struct ksmbd_file *fp = NULL;
+	struct ksmbd_file *fp;
 	loff_t offset;
 	size_t length;
 	ssize_t nbytes;
@@ -6128,8 +6157,8 @@ int smb2_write(struct ksmbd_work *work)
 	fp = ksmbd_lookup_fd_slow(work, le64_to_cpu(req->VolatileFileId),
 		le64_to_cpu(req->PersistentFileId));
 	if (!fp) {
-		rsp->hdr.Status = STATUS_FILE_CLOSED;
-		return -ENOENT;
+		err = -ENOENT;
+		goto out;
 	}
 
 	if (!(fp->daccess & (FILE_WRITE_DATA_LE | FILE_READ_ATTRIBUTES_LE))) {
@@ -8006,10 +8035,11 @@ static void fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, char *old_buf,
 	tr_hdr->ProtocolId = SMB2_TRANSFORM_PROTO_NUM;
 	tr_hdr->OriginalMessageSize = cpu_to_le32(orig_len);
 	tr_hdr->Flags = cpu_to_le16(0x01);
-	if (cipher_type == SMB2_ENCRYPTION_AES128_GCM)
-		get_random_bytes(&tr_hdr->Nonce, SMB3_AES128GCM_NONCE);
+	if (cipher_type == SMB2_ENCRYPTION_AES128_GCM ||
+	    cipher_type == SMB2_ENCRYPTION_AES256_GCM)
+		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
 	else
-		get_random_bytes(&tr_hdr->Nonce, SMB3_AES128CCM_NONCE);
+		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
 	memcpy(&tr_hdr->SessionId, &hdr->SessionId, 8);
 	inc_rfc1001_len(tr_hdr, sizeof(struct smb2_transform_hdr) - 4);
 	inc_rfc1001_len(tr_hdr, orig_len);
