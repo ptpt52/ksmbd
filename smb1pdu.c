@@ -75,11 +75,11 @@ static struct timespec64 smb_NTtimeToUnix(__le64 ntutc)
  *
  * Return:      smb command value
  */
-uint16_t get_smb_cmd_val(struct ksmbd_work *work)
+u16 get_smb_cmd_val(struct ksmbd_work *work)
 {
 	struct smb_hdr *rcv_hdr = (struct smb_hdr *)work->request_buf;
 
-	return (uint16_t)rcv_hdr->Command;
+	return (u16)rcv_hdr->Command;
 }
 
 /**
@@ -567,9 +567,6 @@ out_err:
 		rsp_hdr->Status.CifsError = STATUS_ACCESS_DENIED;
 	}
 
-	/* Clean session if there is no tree attached */
-	if (!sess || xa_empty(&work->sess->tree_conns))
-		ksmbd_conn_set_exiting(work);
 	inc_rfc1001_len(rsp_hdr, (7 * 2 + le16_to_cpu(rsp->ByteCount) +
 		extra_byte));
 	return -EINVAL;
