@@ -14,92 +14,15 @@
 #include <linux/posix_acl.h>
 
 #include "smbacl.h"
+#include "xattr.h"
 
-/* STREAM XATTR PREFIX */
-#define STREAM_PREFIX			"DosStream."
-#define STREAM_PREFIX_LEN		(sizeof(STREAM_PREFIX) - 1)
-#define XATTR_NAME_STREAM		(XATTR_USER_PREFIX STREAM_PREFIX)
-#define XATTR_NAME_STREAM_LEN		(sizeof(XATTR_NAME_STREAM) - 1)
-
+/*
+ * Enumeration for stream type.
+ */
 enum {
-	XATTR_DOSINFO_ATTRIB		= 0x00000001,
-	XATTR_DOSINFO_EA_SIZE		= 0x00000002,
-	XATTR_DOSINFO_SIZE		= 0x00000004,
-	XATTR_DOSINFO_ALLOC_SIZE	= 0x00000008,
-	XATTR_DOSINFO_CREATE_TIME	= 0x00000010,
-	XATTR_DOSINFO_CHANGE_TIME	= 0x00000020,
-	XATTR_DOSINFO_ITIME		= 0x00000040
+	DATA_STREAM	= 1,	/* type $DATA */
+	DIR_STREAM		/* type $INDEX_ALLOCATION */
 };
-
-struct xattr_dos_attrib {
-	__u16	version;
-	__u32	flags;
-	__u32	attr;
-	__u32	ea_size;
-	__u64	size;
-	__u64	alloc_size;
-	__u64	create_time;
-	__u64	change_time;
-	__u64	itime;
-};
-
-/* DOS ATTRIBUITE XATTR PREFIX */
-#define DOS_ATTRIBUTE_PREFIX		"DOSATTRIB"
-#define DOS_ATTRIBUTE_PREFIX_LEN	(sizeof(DOS_ATTRIBUTE_PREFIX) - 1)
-#define XATTR_NAME_DOS_ATTRIBUTE	\
-		(XATTR_USER_PREFIX DOS_ATTRIBUTE_PREFIX)
-#define XATTR_NAME_DOS_ATTRIBUTE_LEN	\
-		(sizeof(XATTR_USER_PREFIX DOS_ATTRIBUTE_PREFIX) - 1)
-
-#define XATTR_SD_HASH_TYPE_SHA256	0x1
-#define XATTR_SD_HASH_SIZE		64
-
-#define SMB_ACL_READ			4
-#define SMB_ACL_WRITE			2
-#define SMB_ACL_EXECUTE			1
-
-enum {
-	SMB_ACL_TAG_INVALID = 0,
-	SMB_ACL_USER,
-	SMB_ACL_USER_OBJ,
-	SMB_ACL_GROUP,
-	SMB_ACL_GROUP_OBJ,
-	SMB_ACL_OTHER,
-	SMB_ACL_MASK
-};
-
-struct xattr_acl_entry {
-	int type;
-	uid_t uid;
-	gid_t gid;
-	mode_t perm;
-};
-
-struct xattr_smb_acl {
-	int count;
-	int next;
-	struct xattr_acl_entry entries[0];
-};
-
-struct xattr_ntacl {
-	__u16	version;
-	void	*sd_buf;
-	__u32	sd_size;
-	__u16	hash_type;
-	__u8	desc[10];
-	__u16	desc_len;
-	__u64	current_time;
-	__u8	hash[XATTR_SD_HASH_SIZE];
-	__u8	posix_acl_hash[XATTR_SD_HASH_SIZE];
-};
-
-/* SECURITY DESCRIPTOR XATTR PREFIX */
-#define SD_PREFIX			"NTACL"
-#define SD_PREFIX_LEN	(sizeof(SD_PREFIX) - 1)
-#define XATTR_NAME_SD	\
-		(XATTR_SECURITY_PREFIX SD_PREFIX)
-#define XATTR_NAME_SD_LEN	\
-		(sizeof(XATTR_SECURITY_PREFIX SD_PREFIX) - 1)
 
 /* CreateOptions */
 /* Flag is set, it must not be a file , valid for directory only */
@@ -187,14 +110,8 @@ struct ksmbd_kstat {
 	__le32			file_attributes;
 };
 
-struct ksmbd_fs_sector_size {
-	unsigned short	logical_sector_size;
-	unsigned int	physical_sector_size;
-	unsigned int	optimal_io_size;
-};
-
-int ksmbd_vfs_inode_permission(struct dentry *dentry, int acc_mode,
-			       bool delete);
+int ksmbd_vfs_lock_parent(struct dentry *parent, struct dentry *child);
+int ksmbd_vfs_may_delete(struct dentry *dentry);
 int ksmbd_vfs_query_maximal_access(struct dentry *dentry, __le32 *daccess);
 int ksmbd_vfs_create(struct ksmbd_work *work, const char *name, umode_t mode);
 int ksmbd_vfs_mkdir(struct ksmbd_work *work, const char *name, umode_t mode);
@@ -233,9 +150,6 @@ int ksmbd_vfs_copy_file_ranges(struct ksmbd_work *work,
 			       unsigned int *chunk_count_written,
 			       unsigned int *chunk_size_written,
 			       loff_t  *total_size_written);
-int ksmbd_vfs_copy_file_range(struct file *file_in, loff_t pos_in,
-			      struct file *file_out, loff_t pos_out,
-			      size_t len);
 struct ksmbd_file *ksmbd_vfs_dentry_open(struct ksmbd_work *work,
 					 const struct path *path, int flags,
 					 __le32 option, int fexist);
@@ -256,10 +170,6 @@ int ksmbd_vfs_kern_path(char *name, unsigned int flags, struct path *path,
 			bool caseless);
 int ksmbd_vfs_empty_dir(struct ksmbd_file *fp);
 void ksmbd_vfs_set_fadvise(struct file *filp, __le32 option);
-int ksmbd_vfs_lock(struct file *filp, int cmd, struct file_lock *flock);
-int ksmbd_vfs_readdir(struct file *file, struct ksmbd_readdir_data *rdata);
-int ksmbd_vfs_alloc_size(struct ksmbd_work *work, struct ksmbd_file *fp,
-			 loff_t len);
 int ksmbd_vfs_zero_data(struct ksmbd_work *work, struct ksmbd_file *fp,
 			loff_t off, loff_t len);
 struct file_allocated_range_buffer;
@@ -267,9 +177,6 @@ int ksmbd_vfs_fqar_lseek(struct ksmbd_file *fp, loff_t start, loff_t length,
 			 struct file_allocated_range_buffer *ranges,
 			 int in_count, int *out_count);
 int ksmbd_vfs_unlink(struct dentry *dir, struct dentry *dentry);
-unsigned short ksmbd_vfs_logical_sector_size(struct inode *inode);
-void ksmbd_vfs_smb2_sector_size(struct inode *inode,
-				struct ksmbd_fs_sector_size *fs_ss);
 void *ksmbd_vfs_init_kstat(char **p, struct ksmbd_kstat *ksmbd_kstat);
 int ksmbd_vfs_fill_dentry_attrs(struct ksmbd_work *work, struct dentry *dentry,
 				struct ksmbd_kstat *ksmbd_kstat);
@@ -286,10 +193,6 @@ int ksmbd_vfs_set_dos_attrib_xattr(struct dentry *dentry,
 				   struct xattr_dos_attrib *da);
 int ksmbd_vfs_get_dos_attrib_xattr(struct dentry *dentry,
 				   struct xattr_dos_attrib *da);
-struct posix_acl *ksmbd_vfs_posix_acl_alloc(int count, gfp_t flags);
-struct posix_acl *ksmbd_vfs_get_acl(struct inode *inode, int type);
-int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
-			    struct posix_acl *acl);
 int ksmbd_vfs_set_init_posix_acl(struct inode *inode);
 int ksmbd_vfs_inherit_posix_acl(struct inode *inode,
 				struct inode *parent_inode);

@@ -735,10 +735,29 @@ struct lease_context {
 	__le64 LeaseDuration;
 } __packed;
 
+struct lease_context_v2 {
+	__le64 LeaseKeyLow;
+	__le64 LeaseKeyHigh;
+	__le32 LeaseState;
+	__le32 LeaseFlags;
+	__le64 LeaseDuration;
+	__le64 ParentLeaseKeyLow;
+	__le64 ParentLeaseKeyHigh;
+	__le16 Epoch;
+	__le16 Reserved;
+} __packed;
+
 struct create_lease {
 	struct create_context ccontext;
 	__u8   Name[8];
 	struct lease_context lcontext;
+} __packed;
+
+struct create_lease_v2 {
+	struct create_context ccontext;
+	__u8   Name[8];
+	struct lease_context_v2 lcontext;
+	__u8   Pad[4];
 } __packed;
 
 /* Currently defined values for close flags */
@@ -1249,7 +1268,7 @@ struct smb2_oplock_break {
 struct smb2_lease_break {
 	struct smb2_hdr hdr;
 	__le16 StructureSize; /* Must be 44 */
-	__le16 Reserved;
+	__le16 Epoch;
 	__le32 Flags;
 	__u8   LeaseKey[16];
 	__le32 CurrentLeaseState;
@@ -1623,12 +1642,13 @@ void smb2_set_sign_rsp(struct ksmbd_work *work);
 int smb3_check_sign_req(struct ksmbd_work *work);
 void smb3_set_sign_rsp(struct ksmbd_work *work);
 int find_matching_smb2_dialect(int start_index, __le16 *cli_dialects,
-		__le16 dialects_count);
+			       __le16 dialects_count);
 struct file_lock *smb_flock_init(struct file *f);
 int setup_async_work(struct ksmbd_work *work, void (*fn)(void **),
-		void **arg);
+		     void **arg);
 void smb2_send_interim_resp(struct ksmbd_work *work, __le32 status);
-struct channel *lookup_chann_list(struct ksmbd_session *sess);
+struct channel *lookup_chann_list(struct ksmbd_session *sess,
+				  struct ksmbd_conn *conn);
 void smb3_preauth_hash_rsp(struct ksmbd_work *work);
 int smb3_is_transform_hdr(void *buf);
 int smb3_decrypt_req(struct ksmbd_work *work);

@@ -14,7 +14,6 @@
 #include "smb_common.h"
 #include "server.h"
 #include "misc.h"
-#include "ksmbd_server.h"
 #include "mgmt/share_config.h"
 
 static const struct smb_sid domain = {1, 4, {0, 0, 0, 0, 0, 5},
@@ -264,8 +263,8 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype,
 	 * Just return an error.
 	 */
 	if (unlikely(psid->num_subauth > SID_MAX_SUB_AUTHORITIES)) {
-		ksmbd_err("%s: %u subauthorities is too many!\n",
-			  __func__, psid->num_subauth);
+		pr_err("%s: %u subauthorities is too many!\n",
+		       __func__, psid->num_subauth);
 		return -EIO;
 	}
 
@@ -383,7 +382,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	/* validate that we do not go past end of acl */
 	if (end_of_acl <= (char *)pdacl ||
 	    end_of_acl < (char *)pdacl + le16_to_cpu(pdacl->size)) {
-		ksmbd_err("ACL too small to parse DACL\n");
+		pr_err("ACL too small to parse DACL\n");
 		return;
 	}
 
@@ -477,8 +476,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			temp_fattr.cf_uid = INVALID_UID;
 			ret = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
 			if (ret || uid_eq(temp_fattr.cf_uid, INVALID_UID)) {
-				ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
-					  __func__, ret);
+				pr_err("%s: Error %d mapping Owner SID to uid\n",
+				       __func__, ret);
 				continue;
 			}
 
@@ -532,7 +531,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 	if (acl_state.users->n || acl_state.groups->n) {
 		acl_state.mask.allow = 0x07;
-		fattr->cf_acls = ksmbd_vfs_posix_acl_alloc(acl_state.users->n +
+		fattr->cf_acls = posix_acl_alloc(acl_state.users->n +
 			acl_state.groups->n + 4, GFP_KERNEL);
 		if (fattr->cf_acls) {
 			cf_pace = fattr->cf_acls->a_entries;
@@ -543,7 +542,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	if (default_acl_state.users->n || default_acl_state.groups->n) {
 		default_acl_state.mask.allow = 0x07;
 		fattr->cf_dacls =
-			ksmbd_vfs_posix_acl_alloc(default_acl_state.users->n +
+			posix_acl_alloc(default_acl_state.users->n +
 			default_acl_state.groups->n + 4, GFP_KERNEL);
 		if (fattr->cf_dacls) {
 			cf_pdace = fattr->cf_dacls->a_entries;
@@ -764,7 +763,7 @@ static int parse_sid(struct smb_sid *psid, char *end_of_acl)
 	 * bytes long (assuming no sub-auths - e.g. the null SID
 	 */
 	if (end_of_acl < (char *)psid + 8) {
-		ksmbd_err("ACL too small to parse SID %p\n", psid);
+		pr_err("ACL too small to parse SID %p\n", psid);
 		return -EINVAL;
 	}
 
@@ -808,14 +807,14 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	if (pntsd->osidoffset) {
 		rc = parse_sid(owner_sid_ptr, end_of_acl);
 		if (rc) {
-			ksmbd_err("%s: Error %d parsing Owner SID\n", __func__, rc);
+			pr_err("%s: Error %d parsing Owner SID\n", __func__, rc);
 			return rc;
 		}
 
 		rc = sid_to_id(owner_sid_ptr, SIDOWNER, fattr);
 		if (rc) {
-			ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
-				  __func__, rc);
+			pr_err("%s: Error %d mapping Owner SID to uid\n",
+			       __func__, rc);
 			owner_sid_ptr = NULL;
 		}
 	}
@@ -823,14 +822,14 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	if (pntsd->gsidoffset) {
 		rc = parse_sid(group_sid_ptr, end_of_acl);
 		if (rc) {
-			ksmbd_err("%s: Error %d mapping Owner SID to gid\n",
-				  __func__, rc);
+			pr_err("%s: Error %d mapping Owner SID to gid\n",
+			       __func__, rc);
 			return rc;
 		}
 		rc = sid_to_id(group_sid_ptr, SIDUNIX_GROUP, fattr);
 		if (rc) {
-			ksmbd_err("%s: Error %d mapping Group SID to gid\n",
-				  __func__, rc);
+			pr_err("%s: Error %d mapping Group SID to gid\n",
+			       __func__, rc);
 			group_sid_ptr = NULL;
 		}
 	}
@@ -1202,7 +1201,7 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, struct dentry *dentry,
 			granted = GENERIC_ALL_FLAGS;
 	}
 
-	posix_acls = ksmbd_vfs_get_acl(d_inode(dentry), ACL_TYPE_ACCESS);
+	posix_acls = get_acl(d_inode(dentry), ACL_TYPE_ACCESS);
 	if (posix_acls && !found) {
 		unsigned int id = -1;
 
@@ -1287,11 +1286,20 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 	ksmbd_vfs_remove_acl_xattrs(dentry);
 	/* Update posix acls */
 	if (fattr.cf_dacls) {
-		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS,
-					     fattr.cf_acls);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+		rc = set_posix_acl(&init_user_ns, inode, ACL_TYPE_ACCESS,
+				   fattr.cf_acls);
+#else
+		rc = set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+#endif
 		if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
-			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT,
-						     fattr.cf_dacls);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+			rc = set_posix_acl(&init_user_ns, inode,
+					   ACL_TYPE_DEFAULT, fattr.cf_dacls);
+#else
+			rc = set_posix_acl(inode, ACL_TYPE_DEFAULT,
+					   fattr.cf_dacls);
+#endif
 	}
 
 	/* Check it only calling from SD BUFFER context */

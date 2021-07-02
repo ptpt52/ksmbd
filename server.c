@@ -16,7 +16,6 @@
 #include "server.h"
 #include "smb_common.h"
 #include "smbstatus.h"
-#include "buffer_pool.h"
 #include "connection.h"
 #include "transport_ipc.h"
 #include "mgmt/user_session.h"
@@ -278,7 +277,7 @@ static int queue_ksmbd_work(struct ksmbd_conn *conn)
 
 	work = ksmbd_alloc_work_struct();
 	if (!work) {
-		ksmbd_err("allocation for work failed\n");
+		pr_err("allocation for work failed\n");
 		return -ENOMEM;
 	}
 
@@ -443,7 +442,7 @@ static ssize_t kill_server_store(struct class *class,
 	if (!sysfs_streq(buf, "hard"))
 		return len;
 
-	ksmbd_info("kill command received\n");
+	pr_info("kill command received\n");
 	mutex_lock(&ctrl_lock);
 	WRITE_ONCE(server_conf.state, SERVER_STATE_RESETTING);
 	__module_get(THIS_MODULE);
@@ -536,7 +535,8 @@ static int ksmbd_server_shutdown(void)
 	ksmbd_crypto_destroy();
 	ksmbd_free_global_file_table();
 	destroy_lease_table(NULL);
-	ksmbd_destroy_buffer_pools();
+	ksmbd_work_pool_destroy();
+	ksmbd_exit_file_cache();
 	server_conf_free();
 	return 0;
 }
@@ -547,7 +547,7 @@ static int __init ksmbd_server_init(void)
 
 	ret = class_register(&ksmbd_control_class);
 	if (ret) {
-		ksmbd_err("Unable to register ksmbd-control class\n");
+		pr_err("Unable to register ksmbd-control class\n");
 		return ret;
 	}
 
@@ -557,13 +557,17 @@ static int __init ksmbd_server_init(void)
 	if (ret)
 		goto err_unregister;
 
-	ret = ksmbd_init_buffer_pools();
+	ret = ksmbd_work_pool_init();
 	if (ret)
 		goto err_unregister;
 
+	ret = ksmbd_init_file_cache();
+	if (ret)
+		goto err_destroy_work_pools;
+
 	ret = ksmbd_ipc_init();
 	if (ret)
-		goto err_free_session_table;
+		goto err_exit_file_cache;
 
 	ret = ksmbd_init_global_file_table();
 	if (ret)
@@ -590,8 +594,10 @@ err_destroy_file_table:
 	ksmbd_free_global_file_table();
 err_ipc_release:
 	ksmbd_ipc_release();
-err_free_session_table:
-	ksmbd_destroy_buffer_pools();
+err_exit_file_cache:
+	ksmbd_exit_file_cache();
+err_destroy_work_pools:
+	ksmbd_work_pool_destroy();
 err_unregister:
 	class_unregister(&ksmbd_control_class);
 
