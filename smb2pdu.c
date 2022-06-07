@@ -3998,7 +3998,7 @@ int smb2_query_dir(struct ksmbd_work *work)
 		goto no_buf_len;
 	if (rc == 0)
 		restart_ctx(&dir_fp->readdir_data.ctx);
-	if (rc == -ENOSPC)
+	if (rc == -ENOSPC || rc == -ENOENT)
 		rc = 0;
 	if (rc)
 		goto err_out;
